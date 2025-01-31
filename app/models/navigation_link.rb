@@ -1,10 +1,13 @@
 class NavigationLink < ApplicationRecord
-  SVG_REGEXP = /<svg .*>/im
+  SVG_REGEXP = /\A<svg .*>[\s]*\z/im
+
+  belongs_to :subforem, optional: true
 
   before_validation :allow_relative_url, if: :url?
   before_save :strip_local_hostname, if: :url?
 
   enum section: { default: 0, other: 1 }, _suffix: true
+  enum display_to: { all: 0, logged_in: 1, logged_out: 2 }, _prefix: true
 
   validates :name, :url, :icon, presence: true
   validates :url, url: { schemes: %w[https http] }, uniqueness: { scope: :name }
@@ -12,6 +15,12 @@ class NavigationLink < ApplicationRecord
   validates :display_only_when_signed_in, inclusion: { in: [true, false] }
 
   scope :ordered, -> { order(position: :asc, name: :asc) }
+
+  scope :from_subforem, lambda { |subforem_id = nil|
+    subforem_id ||= RequestStore.store[:subforem_id]
+    where(subforem_id: [subforem_id, nil])
+  }
+
 
   # With the given :url either create a NavigationLink or update an existing NavigationLink with the
   # given :attributes.

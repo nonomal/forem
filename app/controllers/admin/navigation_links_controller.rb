@@ -1,14 +1,16 @@
 module Admin
   class NavigationLinksController < Admin::ApplicationController
     after_action :bust_content_change_caches, only: %i[create update destroy]
+    after_action :bust_navigation_links_cache, only: %i[create update destroy]
+
     ALLOWED_PARAMS = %i[
-      name url icon display_only_when_signed_in position section
+      name url icon display_to position section
     ].freeze
     layout "admin"
 
     def index
-      @default_nav_links = NavigationLink.default_section.ordered
-      @other_nav_links = NavigationLink.other_section.ordered
+      @default_nav_links = NavigationLink.from_subforem.default_section.ordered
+      @other_nav_links = NavigationLink.from_subforem.other_section.ordered
     end
 
     def create
@@ -51,6 +53,11 @@ module Admin
 
     def navigation_link_params
       params.require(:navigation_link).permit(ALLOWED_PARAMS)
+    end
+
+    def bust_navigation_links_cache
+      Rails.cache.delete("navigation_links")
+      EdgeCache::Bust.call("/async_info/navigation_links")
     end
   end
 end

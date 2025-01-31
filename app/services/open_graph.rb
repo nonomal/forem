@@ -48,6 +48,7 @@ class OpenGraph
   end
 
   def main_properties
+    # QUESTION: If we don't have `og:url` could we infer the url based on what was passed?
     %w[og:title og:url]
   end
 
@@ -84,7 +85,8 @@ class OpenGraph
 
   def fetch_html(url)
     Rails.cache.fetch("#{url}_open_graph_html", expires_in: CACHE_EXPIRY_IN_MINUTES.minutes) do
-      Net::HTTP.get(URI(url))
+      response = HTTParty.get(url, headers: { "User-Agent" => "#{Settings::Community.community_name} (#{URL.url})" })
+      response&.body
     end
   end
 

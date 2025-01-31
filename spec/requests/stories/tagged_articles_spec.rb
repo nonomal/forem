@@ -1,7 +1,7 @@
 require "rails_helper"
 
 # rubocop:disable RSpec/NestedGroups
-RSpec.describe "Stories::TaggedArticlesIndex", type: :request do
+RSpec.describe "Stories::TaggedArticlesIndex" do
   %i[enable disable].each do |method|
     context "when :optimize_article_tag_query is #{method}d" do
       before do
@@ -13,22 +13,11 @@ RSpec.describe "Stories::TaggedArticlesIndex", type: :request do
         let(:tag) { create(:tag) }
         let(:org) { create(:organization) }
         let(:article) { create(:article, tags: tag.name, score: 5) }
+        let(:unsupported_tag) { create(:tag, supported: false) }
 
         before do
           stub_const("Stories::TaggedArticlesController::SIGNED_OUT_RECORD_COUNT", 10)
           create(:article, tags: tag.name, score: 5)
-        end
-
-        def create_live_sponsor(org, tag)
-          create(
-            :sponsorship,
-            level: :tag,
-            blurb_html: "<p>Oh Yeah!!!</p>",
-            status: "live",
-            organization: org,
-            sponsorable: tag,
-            expires_at: 30.days.from_now,
-          )
         end
 
         context "with caching headers" do
@@ -41,7 +30,7 @@ RSpec.describe "Stories::TaggedArticlesIndex", type: :request do
           end
 
           def renders_page
-            expect(response.status).to eq(200)
+            expect(response).to have_http_status(:ok)
             expect(response.body).to include(tag.name)
           end
 
@@ -49,21 +38,22 @@ RSpec.describe "Stories::TaggedArticlesIndex", type: :request do
             expected_cache_control_headers = %w[public no-cache]
             expect(response.headers["Cache-Control"].split(", ")).to match_array(expected_cache_control_headers)
 
-            expected_surrogate_control_headers = %w[max-age=600 stale-while-revalidate=30 stale-if-error=86400]
+            expected_surrogate_control_headers = %w[max-age=86400 stale-while-revalidate=1000 stale-if-error=86400]
             expect(response.headers["Surrogate-Control"].split(", ")).to match_array(expected_surrogate_control_headers)
 
-            expected_surrogate_key_headers = %W[articles-#{tag}]
+            # articles/139
+            expected_surrogate_key_headers = ["articles/#{Article.last.id} tags/#{tag.id}"]
             expect(response.headers["Surrogate-Key"].split(", ")).to match_array(expected_surrogate_key_headers)
           end
 
           def sets_nginx_headers
-            expect(response.headers["X-Accel-Expires"]).to eq("600")
+            expect(response.headers["X-Accel-Expires"]).to eq("86400")
           end
         end
 
         it "renders page when tag is not supported but has at least one approved article" do
-          unsupported_tag = create(:tag, supported: false)
-          create(:article, published: true, approved: true, tags: unsupported_tag, published_at: 5.years.ago)
+          create(:article, :past, published: true, approved: true, tags: unsupported_tag,
+                                  past_published_at: 5.years.ago)
 
           get "/t/#{unsupported_tag.name}/top/week"
 
@@ -85,6 +75,21 @@ RSpec.describe "Stories::TaggedArticlesIndex", type: :request do
           expect { get "/t/#{tag.name}" }.to raise_error(ActiveRecord::RecordNotFound)
         end
 
+        it "renders not found if there are approved but scheduled posts" do
+          create(:article, published: true, approved: true, tags: unsupported_tag, published_at: 1.hour.from_now)
+          expect { get "/t/#{unsupported_tag.name}" }.to raise_error(ActiveRecord::RecordNotFound)
+        end
+
+        it "handles non-basic feed strategy" do
+          allow(Settings::UserExperience).to receive(:feed_strategy).and_return("rich")
+          allow(Rails.cache).to receive(:fetch).and_call_original
+
+          get "/t/#{tag.name}"
+          expect(response.body).to include(tag.name)
+          expected_args = ["#{tag.cache_key}/article-cached-tagged-count", { expires_in: 2.hours }]
+          expect(Rails.cache).to have_received(:fetch).with(*expected_args).once
+        end
+
         it "renders normal page if no articles but tag is supported" do
           Article.destroy_all
           expect { get "/t/#{tag.name}" }.not_to raise_error
@@ -101,28 +106,19 @@ RSpec.describe "Stories::TaggedArticlesIndex", type: :request do
           expect(response.body).to include(tag.name)
         end
 
+        it "displays articles with score > -20 on top/week", :aggregate_failures do
+          article
+          bad_article = create(:article, tags: tag.name, score: -30)
+          get "/t/#{tag.name}/top/week"
+          expect(response.body).to include(CGI.escapeHTML(article.title))
+          expect(response.body).not_to include(CGI.escapeHTML(bad_article.title))
+        end
+
         it "renders tag after alias change" do
           tag2 = create(:tag, alias_for: tag.name)
           get "/t/#{tag2.name}"
           expect(response.body).to redirect_to "/t/#{tag.name}"
           expect(response).to have_http_status(:moved_permanently)
-        end
-
-        it "does not render sponsor if not live" do
-          sponsorship = create(
-            :sponsorship, level: :tag, tagline: "Oh Yeah!!!", status: "pending", organization: org, sponsorable: tag
-          )
-
-          get "/t/#{tag.name}"
-          expect(response.body).not_to include("is sponsored by")
-          expect(response.body).not_to include(sponsorship.tagline)
-        end
-
-        it "renders live sponsor" do
-          sponsorship = create_live_sponsor(org, tag)
-          get "/t/#{tag.name}"
-          expect(response.body).to include("is sponsored by")
-          expect(response.body).to include(sponsorship.blurb_html)
         end
 
         it "shows meta keywords if set" do
@@ -138,6 +134,23 @@ RSpec.describe "Stories::TaggedArticlesIndex", type: :request do
           expect(response.body).not_to include(
             "<meta name=\"keywords\" content=\"software engineering, ruby, #{tag.name}\">",
           )
+        end
+
+        context "when the tag has moderators" do
+          let(:six_badge_mod) { create(:user, badge_achievements_count: 6) }
+          let(:three_badge_mod) { create(:user, badge_achievements_count: 3) }
+          let(:ten_badge_mod) { create(:user, badge_achievements_count: 10) }
+          let(:two_badge_mod) { create(:user, badge_achievements_count: 2) }
+          let(:eight_badge_mod) { create(:user, badge_achievements_count: 8) }
+          let(:mods) { [six_badge_mod, three_badge_mod, ten_badge_mod, two_badge_mod, eight_badge_mod] }
+
+          before do
+            mods.each { |mod| mod.add_role(:tag_moderator, tag) }
+          end
+
+          def nth_avatar(user_position)
+            ".widget-user-pic:nth-child(#{user_position})"
+          end
         end
 
         context "with user signed in" do
@@ -243,7 +256,7 @@ RSpec.describe "Stories::TaggedArticlesIndex", type: :request do
           end
 
           def renders_canonical_url(tag)
-            expect(response.body).to include("<link rel=\"canonical\" href=\"http://localhost:3000/t/#{tag.name}\" />")
+            expect(response.body).to include("<link rel=\"canonical\" href=\"http://forem.test/t/#{tag.name}\" />")
           end
 
           it "renders proper page 2", :aggregate_failures do
@@ -259,7 +272,7 @@ RSpec.describe "Stories::TaggedArticlesIndex", type: :request do
           end
 
           def renders_page_2_canonical_url(tag)
-            expected_tag = "<link rel=\"canonical\" href=\"http://localhost:3000/t/#{tag.name}/page/2\" />"
+            expected_tag = "<link rel=\"canonical\" href=\"http://forem.test/t/#{tag.name}/page/2\" />"
             expect(response.body).to include(expected_tag)
           end
         end

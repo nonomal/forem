@@ -6,6 +6,9 @@ module Constants
       Emails
       Reports
       Flags
+      Articles
+      Comments
+      UnpublishLogs
     ].freeze
   end
 end

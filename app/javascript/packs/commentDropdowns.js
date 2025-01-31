@@ -1,4 +1,3 @@
-import { addSnackbarItem } from '../Snackbar';
 import {
   initializeDropdown,
   getDropdownRepositionListener,
@@ -11,7 +10,7 @@ const handleCopyPermalink = (closeDropdown) => {
     event.preventDefault();
     const permalink = event.target.href;
     copyToClipboard(permalink).then(() => {
-      addSnackbarItem({ message: 'Copied to clipboard' });
+      top.addSnackbarItem({ message: 'Copied to clipboard' });
     });
     closeDropdown();
   };
@@ -20,7 +19,7 @@ const handleCopyPermalink = (closeDropdown) => {
 const initializeArticlePageDropdowns = () => {
   // Gather all dropdown triggers for comment options and profile previews
   const dropdownTriggers = document.querySelectorAll(
-    'button[id^=comment-dropdown-trigger], button[id^=comment-profile-preview-trigger-]',
+    'button[id^=comment-dropdown-trigger], button[id^=comment-profile-preview-trigger-], button[id^=toggle-comments-sort-dropdown]',
   );
 
   for (const dropdownTrigger of dropdownTriggers) {

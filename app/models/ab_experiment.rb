@@ -14,8 +14,10 @@ class AbExperiment < SimpleDelegator
   # @see ./config/feed-variants/README.md
   ORIGINAL_VARIANT = "original".freeze
 
-  CURRENT_FEED_STRATEGY_EXPERIMENT = FieldTest.config["experiments"]&.keys
-  &.detect { |e| e.start_with? "feed_strategy" }.freeze
+  # @note a present assumption is that we will have a feed_strategy oriented experiment.
+  CURRENT_FEED_STRATEGY_EXPERIMENT = FieldTest.config["experiments"].select do |key, value|
+    key.start_with?("feed_strategy") && !value["winner"]
+  end.keys.first
 
   # Sometimes we might want to repurpose the same AbExperiment logic
   # for different experiments.  This provides the tooling for that
@@ -96,6 +98,20 @@ class AbExperiment < SimpleDelegator
     method_name = method_name_for(experiment)
     new(controller: controller)
       .public_send(method_name, user: user, default_value: default_value, experiment: experiment, config: config)
+  end
+
+  # Responsible for checking if a given :user has "accomplished" the state :goal for any of the
+  # active :experiments.  We only consider events that occur on or after each experiment's given
+  # start_date.
+  #
+  # @param user [User]
+  # @param goal [String]
+  # @param experiments [Hash<String, Object>]
+  #
+  # @see AbExperiment::GoalConversionChecker
+  # @see FieldTest.config
+  def self.register_conversions_for(user:, goal:, experiments: FieldTest.config["experiments"])
+    GoalConversionHandler.call(user: user, goal: goal, experiments: experiments)
   end
 
   # @api private

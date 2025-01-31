@@ -21,7 +21,7 @@ RSpec.describe Badges::AwardCommunityWellness, type: :service do
       # Create 2 comments per-week to be tested, i.e. week 8 would create 2
       # comments on each of the 8 weeks (calculated on days_ago per week)
       reward_weeks[index].times do |week|
-        days_ago = (5 + (week * 7)).days.ago
+        days_ago = (8 + (week * 7)).days.ago
         create_comment_time_ago(users[index].id, days_ago, commentable: articles.sample)
         create_comment_time_ago(users[index].id, days_ago, commentable: articles.sample)
       end
@@ -31,11 +31,7 @@ RSpec.describe Badges::AwardCommunityWellness, type: :service do
   context "when user meets a new streak level" do
     # Test against each week that has a reward associated to it. All mock users
     # are expected to receive a badge in this spec (one per reward_weeks)
-    #
-    # TODO: When confirmed/tested we must remove the FeatureFlag
     it "awards a badge to each user with a streak of non-flagged comments" do
-      allow(FeatureFlag).to receive(:enabled?).with(:community_wellness_badge).and_return(true)
-
       expect do
         described_class.call
         users.each_with_index do |user, index|
@@ -45,15 +41,6 @@ RSpec.describe Badges::AwardCommunityWellness, type: :service do
           expect(user.reload.badges.last.slug).to eq(badge_slug)
         end
       end.to change(BadgeAchievement, :count).by(users.count)
-    end
-
-    # TODO: When confirmed/tested we must remove the FeatureFlag and this spec
-    it "tracks awards with Ahoy if FeatureFlag isn't enabled" do
-      allow(FeatureFlag).to receive(:enabled?).with(:community_wellness_badge).and_return(false)
-
-      expect do
-        described_class.call
-      end.to change(BadgeAchievement, :count).by(0)
     end
   end
 end

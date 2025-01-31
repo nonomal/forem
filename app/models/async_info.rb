@@ -5,6 +5,7 @@
 # @see UserDecorator
 # @see ApplicationPolicy
 class AsyncInfo
+  include FieldTest::Helpers
   # @api public
   #
   # Generate a Hash of the relevant user data.
@@ -46,13 +47,17 @@ class AsyncInfo
       trusted: user.trusted?,
       moderator_for_tags: user.moderator_for_tags,
       config_body_class: user.config_body_class,
-      feed_style: feed_style_preference,
+      feed_style: feed_style_preference_variable(user),
       created_at: user.created_at,
       admin: user.any_admin?,
       policies: [
         {
           dom_class: ApplicationPolicy.base_dom_class_for(record: Article, query: :create?),
           visible: visible?(record: Article, query: :create?)
+        },
+        {
+          dom_class: ApplicationPolicy.base_dom_class_for(record: Article, query: :moderate?),
+          visible: visible?(record: Article, query: :moderate?)
         },
       ],
       apple_auth: user.email.to_s.end_with?("@privaterelay.appleid.com")
@@ -70,5 +75,12 @@ class AsyncInfo
     context.__send__(:policy, record).public_send(query)
   rescue Pundit::NotAuthorizedError
     false
+  end
+
+  def feed_style_preference_variable(user)
+    # TODO: Let users set their own feed style preference
+    # Currently only at app level
+
+    feed_style_preference
   end
 end
