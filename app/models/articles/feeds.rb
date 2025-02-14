@@ -12,7 +12,8 @@ module Articles
     #       into an administrative setting.  Hence, I want to keep it
     #       a scalar to ease the implementation details of the admin
     #       setting.
-    NUMBER_OF_HOURS_TO_OFFSET_USERS_LATEST_ARTICLE_VIEWS = 18
+    NUMBER_OF_HOURS_TO_OFFSET_USERS_LATEST_ARTICLE_VIEWS =
+      (ApplicationConfig["NUMBER_OF_HOURS_TO_OFFSET_USERS_LATEST_ARTICLE_VIEWS"] || 18).to_i
 
     DEFAULT_USER_EXPERIENCE_LEVEL = 5
     DEFAULT_NEGATIVE_REACTION_THRESHOLD = -10
@@ -47,7 +48,9 @@ module Articles
       time_of_second_latest_page_view = user&.page_views&.second_to_last&.created_at
       return days_since_published.days.ago unless time_of_second_latest_page_view
 
-      time_of_second_latest_page_view - NUMBER_OF_HOURS_TO_OFFSET_USERS_LATEST_ARTICLE_VIEWS.hours
+      # If they have a page view *well in the past*, let's go max 18 days look back.
+      time_of_second_latest_page_view = 18.days.ago if time_of_second_latest_page_view < 18.days.ago
+      time_of_second_latest_page_view - number_of_hours_to_offset_users_latest_article_views.hours
     end
 
     # Get the properly configured feed for the given user (and other parameters).
@@ -59,7 +62,7 @@ module Articles
     # @param tag [NilClass, String] not used but carried forward for interface conformance
     #
     # @return [Articles::Feeds::VariantQuery]
-    def self.feed_for(controller:, user:, number_of_articles:, page:, tag:)
+    def self.feed_for(controller:, user:, number_of_articles:, page:, tag:, type_of: "discover")
       variant = AbExperiment.get_feed_variant_for(controller: controller, user: user)
 
       VariantQuery.build_for(
@@ -68,6 +71,7 @@ module Articles
         number_of_articles: number_of_articles,
         page: page,
         tag: tag,
+        type_of: type_of
       )
     end
 
@@ -76,6 +80,10 @@ module Articles
     # @return [Articles::Feeds::LeverCatalogBuilder]
     def self.lever_catalog
       LEVER_CATALOG
+    end
+
+    def self.number_of_hours_to_offset_users_latest_article_views
+      (ApplicationConfig["NUMBER_OF_HOURS_TO_OFFSET_USERS_LATEST_ARTICLE_VIEWS"] || 18).to_i
     end
 
     # rubocop:disable Metrics/BlockLength
@@ -87,7 +95,64 @@ module Articles
 
       order_by_lever(:final_order_by_random_weighted_to_score,
                      label: "Order by conflating a random number and the score (see forem/forem#16128)",
-                     order_by_fragment: "RANDOM() ^ (1.0 / greatest(articles.score, 0.1)) DESC")
+                     order_by_fragment: "article_relevancies.randomized_value " \
+                                        "^ (1.0 / greatest(articles.score, 0.1)) DESC")
+      order_by_lever(:final_order_by_feed_success_score,
+                     label: "Order by feed success score",
+                     order_by_fragment: "articles.feed_success_score DESC")
+      order_by_lever(:final_order_by_feed_success_score_minus_clickbait_score,
+                     label: "Order by feed success score minus clickbait score",
+                     order_by_fragment: "articles.feed_success_score - articles.clickbait_score DESC")
+      order_by_lever(:final_order_by_feed_success_score_minus_half_of_clickbait_score,
+                     label: "Order by feed success score minus half of clickbait score",
+                     order_by_fragment: "articles.feed_success_score - (articles.clickbait_score / 2) DESC")
+      order_by_lever(:final_order_by_feed_success_score_minus_one_tenth_of_clickbait_score,
+                     label: "Order by feed success score minus one tenth of clickbait score",
+                     order_by_fragment: "articles.feed_success_score - (articles.clickbait_score / 10) DESC")
+      order_by_lever(:final_order_by_feed_success_score_minus_clickbait_score_with_randomness,
+                     label: "Order by feed success score minus clickbait score with a randomization factor",
+                     order_by_fragment:
+                      "(articles.feed_success_score - articles.clickbait_score) *
+                      article_relevancies.randomized_value DESC")
+      order_by_lever(:final_order_by_feed_success_score_minus_half_of_clickbait_score_with_small_randomness,
+                     label: "Order by feed success score minus half of clickbait score with a randomization factor",
+                     order_by_fragment:
+                       "(articles.feed_success_score - (articles.clickbait_score / 2)) +
+                       (article_relevancies.randomized_value / 3) DESC")
+      order_by_lever(:final_order_by_feed_success_score_and_primary_score,
+                     label: "Order by feed success score and primary score",
+                     order_by_fragment: "((articles.feed_success_score + 0.01) * (articles.score / 10)) DESC")
+
+      order_by_lever(:final_order_by_feed_success_score_and_log_of_primary_score,
+                     label: "Order by feed success score and log of primary score",
+                     order_by_fragment: "((feed_success_score + 0.01) * LOG(GREATEST(score, 1))) DESC")
+
+      order_by_lever(:final_order_by_feed_success_score_and_log_of_comment_score,
+                     label: "Order by feed success score and log of comment_score",
+                     order_by_fragment: "((feed_success_score + 0.01) * LOG(GREATEST(comment_score, 1))) DESC")
+
+      order_by_lever(:published_at_with_randomization_favoring_public_reactions,
+                     label: "Favor recent articles with more reactions, " \
+                            "but apply randomness to mitigate stagnation.",
+                     order_by_fragment: "(cast(extract(epoch FROM published_at) as integer)) * " \
+                                        "(article_relevancies.randomized_value ^ (1.0 / " \
+                                        "greatest(0.1, ln(1 + greatest(0, public_reactions_count))))) DESC")
+
+      order_by_lever(:last_comment_at_with_randomization_favoring_public_reactions,
+                     label: "Favor articles with recent comments and more reactions, " \
+                            "but apply randomness to mitigate stagnation.",
+                     order_by_fragment: "(cast(extract(epoch FROM last_comment_at) as integer)) * " \
+                                        "(article_relevancies.randomized_value ^ (1.0 / " \
+                                        "greatest(0.1, ln(1 + greatest(0, public_reactions_count))))) DESC")
+
+      order_by_lever(:random_pick_of_which_date_to_use_with_randomization_favoring_public_reactions,
+                     label: "Favor articles with recent comments or published at and more reactions, " \
+                            "but apply randomness to mitigate stagnation.",
+                     order_by_fragment: "(cast(extract(epoch FROM " \
+                                        "(CASE WHEN RANDOM() > 0.5 THEN published_at ELSE last_comment_at END)) " \
+                                        "as integer)) * " \
+                                        "(article_relevancies.randomized_value ^ (1.0 / " \
+                                        "greatest(0.1, ln(1 + greatest(0, public_reactions_count))))) DESC")
 
       relevancy_lever(:comments_count_by_those_followed,
                       label: "Weight to give for the number of comments on the article from other users" \
@@ -115,6 +180,20 @@ module Articles
                       select_fragment: "articles.comments_count",
                       group_by_fragment: "articles.comments_count")
 
+      relevancy_lever(:comments_score,
+                      label: "Weight given based on sum of comment scores of an article.",
+                      range: "[0..∞)",
+                      user_required: false,
+                      select_fragment: "SUM(
+                        CASE
+                          WHEN comments.score is null then 0
+                          ELSE comments.score
+                        END)",
+                      joins_fragments: ["LEFT OUTER JOIN comments
+                        ON comments.commentable_id = articles.id
+                          AND comments.commentable_type = 'Article'
+                          AND comments.deleted = false"])
+
       relevancy_lever(:daily_decay,
                       label: "Weight given based on the relative age of the article",
                       range: "[0..∞)",
@@ -132,7 +211,8 @@ module Articles
                                              WHEN experience_level IS NULL THEN :default_user_experience_level
                                              ELSE experience_level END ) AS user_experience_level
                                           FROM users_settings WHERE users_settings.user_id = :user_id)))",
-                      group_by_fragment: "articles.experience_level_rating")
+                      group_by_fragment: "articles.experience_level_rating",
+                      query_parameter_names: [:default_user_experience_level])
 
       relevancy_lever(:featured_article,
                       label: "Weight to give for feature or unfeatured articles.  1 is featured.",
@@ -256,7 +336,36 @@ module Articles
                  WHEN articles.privileged_users_reaction_points_sum < :negative_reaction_threshold THEN -1
                  WHEN articles.privileged_users_reaction_points_sum > :positive_reaction_threshold THEN 1
                  ELSE 0 END)",
-                      group_by_fragment: "articles.privileged_users_reaction_points_sum")
+                      group_by_fragment: "articles.privileged_users_reaction_points_sum",
+                      query_parameter_names: %i[negative_reaction_threshold positive_reaction_threshold])
+
+      # Note the symmetry of the < and >=; the smaller value is always "exclusive" and the larger value is "inclusive"
+      relevancy_lever(:privileged_user_reaction_granular,
+                      label: "A more granular configuration for privileged user reactions (see select_fragment)",
+                      user_required: false,
+                      range: "[-2..2]",
+                      select_fragment: "(CASE
+                 --- Very negative
+                 WHEN articles.privileged_users_reaction_points_sum < :very_negative_reaction_threshold THEN -2
+                 --- Negative
+                 WHEN articles.privileged_users_reaction_points_sum >= :very_negative_reaction_threshold
+                      AND articles.privileged_users_reaction_points_sum < :negative_reaction_threshold THEN -1
+                 --- Neutral
+                 WHEN articles.privileged_users_reaction_points_sum >= :negative_reaction_threshold
+                      AND articles.privileged_users_reaction_points_sum < :positive_reaction_threshold THEN 0
+                 --- Positive
+                 WHEN articles.privileged_users_reaction_points_sum >= :positive_reaction_threshold
+                      AND articles.privileged_users_reaction_points_sum < :very_positive_reaction_threshold THEN 1
+                 --- Very Positive
+                 WHEN articles.privileged_users_reaction_points_sum >= :very_positive_reaction_threshold THEN 2
+                 ELSE 0 END)",
+                      group_by_fragment: "articles.privileged_users_reaction_points_sum",
+                      query_parameter_names: %i[
+                        very_negative_reaction_threshold
+                        negative_reaction_threshold
+                        very_positive_reaction_threshold
+                        positive_reaction_threshold
+                      ])
 
       relevancy_lever(:public_reactions,
                       label: "Weight to give for the number of unicorn, heart, reading list reactions for article.",
@@ -264,7 +373,48 @@ module Articles
                       user_required: false,
                       select_fragment: "articles.public_reactions_count",
                       group_by_fragment: "articles.public_reactions_count")
+
+      relevancy_lever(:public_reactions_score,
+                      label: "Weight to give based on article.score (see article.update_score for this calculation -
+                      it's a sum of the scores of reactions on an article).",
+                      range: "[0..∞)",
+                      user_required: false,
+                      select_fragment: "articles.score",
+                      group_by_fragment: "articles.score")
+
+      relevancy_lever(:language_match,
+                      label: "Weight to give based on whether the language matches any of the user's languages",
+                      range: "[0..1]", # 0 for no match, 1 for match
+                      user_required: true,
+                      select_fragment: "CASE
+                                         WHEN COUNT(user_languages.language) = 0 THEN 0
+                                         WHEN articles.language = ANY(array_agg(user_languages.language)) THEN 1
+                                         ELSE 0
+                                        END",
+                      joins_fragments: ["LEFT OUTER JOIN user_languages
+                                         ON user_languages.user_id = :user_id"],
+                      group_by_fragment: "articles.language")
+
+      relevancy_lever(:recommended_articles_match,
+                      label: "Weight to give based on whether the article is in the first non-expired recommendations",
+                      range: "[0..1]", # 0 for no match, 1 for match
+                      user_required: true,
+                      select_fragment: "CASE
+                                         WHEN COUNT(first_matching_list.id) = 0 THEN 0
+                                         WHEN articles.id = ANY(array_agg(first_matching_list.article_ids)
+                                         FILTER (WHERE first_matching_list.article_ids IS NOT NULL)) THEN 1
+                                         ELSE 0
+                                        END",
+                      joins_fragments: ["LEFT OUTER JOIN
+                                          (SELECT * FROM recommended_articles_lists
+                                           WHERE expires_at > CURRENT_TIMESTAMP
+                                           AND placement_area = 0
+                                           ORDER BY created_at ASC
+                                           LIMIT 1) AS first_matching_list
+                                        ON first_matching_list.user_id = :user_id"],
+                      group_by_fragment: "articles.id")
     end
+
     private_constant :LEVER_CATALOG
     # rubocop:enable Metrics/BlockLength
   end

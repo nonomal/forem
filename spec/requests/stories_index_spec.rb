@@ -1,18 +1,57 @@
+# spec/requests/stories_index_spec.rb
+
 require "rails_helper"
 
-RSpec.shared_examples "redirects to the lowercase route" do
-  context "when a path contains uppercase characters" do
-    it "redirects to the lowercase route" do
-      get path
-      expect(response).to have_http_status(:moved_permanently)
-      expect(response).to redirect_to(path.downcase)
-    end
-  end
-end
+RSpec.describe "StoriesIndex" do
+  it "redirects to the lowercase route", :aggregate_failures do
+    get "/Bad_name"
+    expect(response).to have_http_status(:moved_permanently)
+    expect(response).to redirect_to("/bad_name")
 
-RSpec.describe "StoriesIndex", type: :request do
+    get "/Bad_name?i=i"
+    expect(response).to have_http_status(:moved_permanently)
+    expect(response).to redirect_to("/bad_name?i=i")
+  end
+
   describe "GET stories index" do
     let(:user) { create(:user) }
+    let(:org) { create(:organization) }
+
+    it "redirects www to non-www if ENV var set" do
+      allow(ApplicationConfig).to receive(:[]).with("REDIRECT_WWW_TO_ROOT").and_return("true")
+      get "http://www.example.com/"
+      expect(response).to have_http_status(:moved_permanently)
+      expect(response).to redirect_to("http://example.com/")
+    end
+
+    it "does not redirect www to non-www if ENV var not set" do
+      get "http://www.example.com/"
+      expect(response).to have_http_status(:ok)
+    end
+
+    it "renders head content if present" do
+      allow(Settings::UserExperience).to receive(:head_content).and_return("head content")
+      get "/"
+      expect(response.body).to include("head content")
+    end
+
+    it "renders topbar styles if Settings::UserExperience.accent_background_color_hex is set" do
+      allow(Settings::UserExperience).to receive(:accent_background_color_hex).and_return("#000000")
+      get "/"
+      expect(response.body).to include("body:not(.dark-theme) #topbar {background")
+    end
+
+    it "does not render topbar styles if Settings::UserExperience.accent_background_color_hex is not set" do
+      allow(Settings::UserExperience).to receive(:accent_background_color_hex).and_return(nil)
+      get "/"
+      expect(response.body).not_to include("body:not(.dark-theme) #topbar {background")
+    end
+
+    it "renders bottom of body content if present" do
+      allow(Settings::UserExperience).to receive(:bottom_of_body_content).and_return("bottom of body content")
+      get "/"
+      expect(response.body).to include("bottom of body content")
+    end
 
     it "renders page with article list and proper attributes", :aggregate_failures do
       article = create(:article, featured: true)
@@ -20,10 +59,25 @@ RSpec.describe "StoriesIndex", type: :request do
 
       get "/"
       expect(response.body).to include(CGI.escapeHTML(article.title))
-      renders_ga_tracking_data
+      renders_ga_tracking_fields
       renders_proper_description
       renders_min_read_time
       renders_proper_sidebar(navigation_link)
+    end
+
+    it "Does not render article with [Boost] as the title" do
+      boost_article = create(:article, title: "[Boost]", score: 1000, featured: true, type_of: "status", body_markdown: "", main_image: "")
+      non_boost_article = create(:article, title: "Not a boost article", score: 1000, featured: true)
+
+      get "/"
+      expect(response.body).not_to include(CGI.escapeHTML(boost_article.title))
+      expect(response.body).to include(CGI.escapeHTML(non_boost_article.title))
+    end
+
+    it "doesn't render a featured scheduled article" do
+      article = create(:article, featured: true, published_at: 1.hour.from_now)
+      get "/"
+      expect(response.body).not_to include(CGI.escapeHTML(article.title))
     end
 
     def renders_proper_description
@@ -38,8 +92,9 @@ RSpec.describe "StoriesIndex", type: :request do
       expect(response.body).to include(CGI.escapeHTML(navigation_link.name))
     end
 
-    def renders_ga_tracking_data
+    def renders_ga_tracking_fields
       expect(response.body).to include("data-ga-tracking=\"#{Settings::General.ga_tracking_id}\"")
+      expect(response.body).to include("data-ga4-tracking-id=\"#{Settings::General.ga_analytics_4_id}\"")
     end
 
     it "renders registration page if the Forem instance is private" do
@@ -59,89 +114,87 @@ RSpec.describe "StoriesIndex", type: :request do
       expect(response.body).to include("This is a landing page!")
     end
 
-    it "renders all display_ads of different placements when published and approved" do
-      org = create(:organization)
-      ad = create(:display_ad, published: true, approved: true, organization: org, placement_area: "sidebar_left")
-      second_left_ad = create(:display_ad, published: true, approved: true, organization: org,
-                                           placement_area: "sidebar_left_2")
-      right_ad = create(:display_ad, published: true, approved: true, placement_area: "sidebar_right",
-                                     organization: org)
+    it "renders billboards when published and approved for sidebar right (first position)" do
+      ad = create(:billboard, published: true, approved: true, placement_area: "sidebar_right",
+                              organization: org)
 
       get "/"
       expect(response.body).to include(ad.processed_html)
-      expect(response.body).to include(second_left_ad.processed_html)
-      expect(response.body).to include(right_ad.processed_html)
     end
 
-    it "does not render display_ads when not approved" do
-      org = create(:organization)
-      ad = create(:display_ad, published: true, approved: false, organization: org)
-      right_ad = create(:display_ad, published: true, approved: false, placement_area: "sidebar_right",
-                                     organization: org)
+    it "renders billboards when published and approved for sidebar right (second position)" do
+      ad = create(:billboard, published: true, approved: true, placement_area: "sidebar_right_second",
+                              organization: org)
+
+      get "/"
+      expect(response.body).to include(ad.processed_html)
+    end
+
+    it "renders billboards when published and approved for sidebar right (third position)" do
+      ad = create(:billboard, published: true, approved: true, placement_area: "sidebar_right_third",
+                              organization: org)
+
+      get "/"
+      expect(response.body).to include(ad.processed_html)
+    end
+
+    it "does not render billboards when not approved" do
+      ad = create(:billboard, published: true, approved: false, placement_area: "sidebar_right",
+                              organization: org)
 
       get "/"
       expect(response.body).not_to include(ad.processed_html)
-      expect(response.body).not_to include(right_ad.processed_html)
     end
 
-    it "renders only one display ad of placement" do
-      org = create(:organization)
-      left_ad = create(:display_ad, published: true, approved: true, placement_area: "sidebar_left", organization: org)
-      second_left_ad = create(:display_ad, published: true, approved: true, placement_area: "sidebar_left",
-                                           organization: org)
+    it "renders only one billboard per placement" do
+      billboard = create(:billboard, published: true, approved: true, placement_area: "sidebar_right",
+                                     organization: org)
+      second_billboard = create(:billboard, published: true, approved: true, placement_area: "sidebar_right",
+                                            organization: org)
 
       get "/"
-      expect(response.body).to include(left_ad.processed_html).or(include(second_left_ad.processed_html))
-      expect(response.body).to include("crayons-sponsorship-widget").once
+      expect(response.body).to include(billboard.processed_html).or(include(second_billboard.processed_html))
+      expect(response.body).to include("crayons-card crayons-card--secondary crayons-bb").once
+      expect(response.body).to include("sponsorship-dropdown-trigger-").once
     end
 
-    it "displays correct sponsors", :aggregate_failures do
-      org = create(:organization)
-      gold_sponsorship = create(:sponsorship, level: "gold", tagline: "GOLD!!!", status: "live", organization: org)
-      silver_sponsorship = create(:sponsorship, level: "silver", tagline: "SILVER!!!", status: "live",
-                                                organization: org)
-      non_live_gold_sponsorship = create(:sponsorship, level: "gold", tagline: "NOT LIVE GOLD!!!", status: "pending",
-                                                       organization: org)
+    it "renders a hero billboard" do
+      allow(FeatureFlag).to receive(:enabled?).with(:hero_billboard).and_return(true)
+      billboard = create(:billboard, published: true, approved: true, placement_area: "home_hero", organization: org)
       get "/"
-
-      displays_gold_sponsors(gold_sponsorship)
-      does_not_display_silver_sponsors(silver_sponsorship)
-      does_not_display_non_live_gold_sponsors(non_live_gold_sponsorship)
+      expect(response.body).to include(billboard.processed_html)
     end
 
-    def displays_gold_sponsors(sponsorship)
-      expect(response.body).to include(sponsorship.tagline)
-    end
-
-    def does_not_display_silver_sponsors(sponsorship)
-      expect(response.body).not_to include(sponsorship.tagline)
-    end
-
-    def does_not_display_non_live_gold_sponsors(sponsorship)
-      expect(response.body).not_to include(sponsorship.tagline)
-    end
-
-    it "shows listings" do
-      user = create(:user)
-      listing = create(:listing, user_id: user.id)
+    it "renders a footer billboard" do
+      billboard = create(:billboard, published: true, approved: true, placement_area: "footer", organization: org)
       get "/"
-      expect(response.body).to include(CGI.escapeHTML(listing.title))
+      expect(response.body).to include(billboard.processed_html)
     end
 
     it "does not set cache-related headers if private" do
       allow(Settings::UserExperience).to receive(:public).and_return(false)
       get "/"
-      expect(response.status).to eq(200)
+      expect(response).to have_http_status(:ok)
 
       expect(response.headers["X-Accel-Expires"]).to be_nil
       expect(response.headers["Cache-Control"]).not_to eq("public, no-cache")
       expect(response.headers["Surrogate-Key"]).to be_nil
     end
 
+    it "renders social media handles if set" do
+      allow(Settings::General).to receive(:social_media_handles)
+        .and_return({ twitter: "twix", facebook: "fb", linkedin: "lnkdn", youtube: "whytube" })
+      get "/"
+      expect(response.body).to include("x.com/twix")
+      expect(response.body).to include("facebook.com/fb")
+      expect(response.body).to include("linkedin.com/in/lnkdn")
+      expect(response.body).to include("youtube.com/@whytube")
+    end
+
     it "sets correct cache headers", :aggregate_failures do
       get "/"
 
-      expect(response.status).to eq(200)
+      expect(response).to have_http_status(:ok)
       sets_fastly_headers
       sets_nginx_headers
     end
@@ -174,7 +227,7 @@ RSpec.describe "StoriesIndex", type: :request do
 
       allow(Settings::UserExperience).to receive(:feed_style).and_return("basic")
       get "/"
-      expect(response.body.scan(/(?=class="crayons-story__cover crayons-story__cover__image)/).count).to be 1
+      expect(response.body.scan(/(?=class="crayons-article__cover crayons-article__cover__image__feed)/).count).to be 1
     end
 
     it "shows multiple cover images if rich feed style" do
@@ -182,7 +235,9 @@ RSpec.describe "StoriesIndex", type: :request do
 
       allow(Settings::UserExperience).to receive(:feed_style).and_return("rich")
       get "/"
-      expect(response.body.scan(/(?=class="crayons-story__cover crayons-story__cover__image)/).count).to be > 1
+      # rubocop:disable Layout/LineLength
+      expect(response.body.scan(/(?=class="crayons-article__cover crayons-article__cover__image__feed)/).count).to be > 1
+      # rubocop:enable Layout/LineLength
     end
 
     context "with campaign hero" do
@@ -220,74 +275,6 @@ RSpec.describe "StoriesIndex", type: :request do
       end
     end
 
-    context "with campaign_sidebar" do
-      before do
-        allow(Settings::Campaign).to receive(:featured_tags).and_return("mytag,yourtag")
-        allow(Settings::UserExperience).to receive(:home_feed_minimum_score).and_return(7)
-
-        a_body = "---\ntitle: Super-sheep#{rand(1000)}\npublished: true\ntags: heyheyhey,mytag\n---\n\nHello"
-        create(:article, approved: true, body_markdown: a_body, score: 1)
-        u_body = "---\ntitle: Unapproved-post#{rand(1000)}\npublished: true\ntags: heyheyhey,mytag\n---\n\nHello"
-        create(:article, approved: false, body_markdown: u_body, score: 1)
-      end
-
-      it "displays display name when it is set" do
-        allow(Settings::Campaign).to receive(:display_name).and_return("Backstreet is back")
-        get "/"
-        expect(response.body).not_to include("Backstreet is back (0)")
-      end
-
-      it "displays Stories fallback when display name is not set" do
-        allow(Settings::Campaign).to receive(:display_name).and_return("")
-        get "/"
-        expect(response.body).not_to include("Stories (0)")
-      end
-
-      it "doesn't display posts with the campaign tags when sidebar is disabled" do
-        allow(Settings::Campaign).to receive(:sidebar_enabled).and_return(false)
-        get "/"
-        expect(response.body).not_to include(CGI.escapeHTML("Super-sheep"))
-      end
-
-      it "doesn't display unapproved posts" do
-        allow(Settings::Campaign).to receive(:sidebar_enabled).and_return(true)
-        allow(Settings::Campaign).to receive(:sidebar_image).and_return("https://example.com/image.png")
-        allow(Settings::Campaign).to receive(:articles_require_approval).and_return(true)
-        Article.last.update_column(:score, -2)
-        get "/"
-        expect(response.body).not_to include(CGI.escapeHTML("Unapproved-post"))
-      end
-
-      it "displays unapproved post if approval is not required" do
-        allow(Settings::Campaign).to receive(:sidebar_enabled).and_return(true)
-        allow(Settings::Campaign).to receive(:sidebar_image).and_return("https://example.com/image.png")
-        allow(Settings::Campaign).to receive(:articles_require_approval).and_return(false)
-        get "/"
-        expect(response.body).to include(CGI.escapeHTML("Unapproved-post"))
-      end
-
-      it "displays only approved posts with the campaign tags" do
-        allow(Settings::Campaign).to receive(:sidebar_enabled).and_return(false)
-        get "/"
-        expect(response.body).not_to include(CGI.escapeHTML("Super-puper"))
-      end
-
-      it "displays sidebar url if url is set" do
-        allow(Settings::Campaign).to receive(:sidebar_enabled).and_return(true)
-        allow(Settings::Campaign).to receive(:url).and_return("https://campaign-lander.com")
-        allow(Settings::Campaign).to receive(:sidebar_image).and_return("https://example.com/image.png")
-        get "/"
-        expect(response.body).to include('<a href="https://campaign-lander.com"')
-      end
-
-      it "does not display sidebar url if image is not present is set" do
-        allow(Settings::Campaign).to receive(:sidebar_enabled).and_return(true)
-        allow(Settings::Campaign).to receive(:url).and_return("https://campaign-lander.com")
-        get "/"
-        expect(response.body).not_to include('<a href="https://campaign-lander.com"')
-      end
-    end
-
     context "with default_locale configured to fr" do
       before do
         allow(Settings::UserExperience).to receive(:default_locale).and_return("fr")
@@ -306,12 +293,29 @@ RSpec.describe "StoriesIndex", type: :request do
 
   describe "GET stories index with timeframe" do
     describe "/latest" do
+      let(:user) { create(:user) }
+      let!(:low_score) { create(:article, score: Settings::UserExperience.home_feed_minimum_score - 50) }
+
+      before do
+        create_list(:article, 3, score: Settings::UserExperience.home_feed_minimum_score + 1)
+      end
+
       it "includes a link to Relevant", :aggregate_failures do
         get "/latest"
 
-        # The link should be `/`
         expected_tag = "<a data-text=\"Relevant\" href=\"/\""
         expect(response.body).to include(expected_tag)
+      end
+
+      it "includes message and a link to sign in for signed-out" do
+        get "/latest"
+        expect(response.body).to include("Some latest posts are only visible for members")
+        expect(response.body).to match(/Sign in.*to see all latest/)
+      end
+
+      it "excludes low-score content for signed-out" do
+        get "/latest"
+        expect(response.body).not_to include(low_score.title)
       end
     end
 
@@ -319,7 +323,6 @@ RSpec.describe "StoriesIndex", type: :request do
       it "includes a link to Relevant", :aggregate_failures do
         get "/top/week"
 
-        # The link should be `/`
         expected_tag = "<a data-text=\"Relevant\" href=\"/\""
         expect(response.body).to include(expected_tag)
       end
@@ -344,10 +347,6 @@ RSpec.describe "StoriesIndex", type: :request do
   end
 
   describe "GET podcast index" do
-    include_examples "redirects to the lowercase route" do
-      let(:path) { "/#{build(:podcast).slug.upcase}" }
-    end
-
     it "renders page with proper header" do
       podcast = create(:podcast)
       create(:podcast_episode, podcast: podcast)
@@ -356,15 +355,30 @@ RSpec.describe "StoriesIndex", type: :request do
     end
   end
 
-  describe "GET user_path" do
-    include_examples "redirects to the lowercase route" do
-      let(:path) { "/#{build(:user).username.upcase}" }
+  describe "Middleware: SetSubforem" do
+    context "when passed_domain param is provided" do
+      it "calls Subforem.cached_id_by_domain with the passed domain" do
+        allow(Subforem).to receive(:cached_id_by_domain).and_call_original
+        allow(Subforem).to receive(:cached_default_id).and_return(999)
+        get "/", params: { passed_domain: "sub.mysite.com" }
+        # This ensures that the subforem logic tries to use "sub.mysite.com"
+        expect(Subforem).to have_received(:cached_id_by_domain).with("sub.mysite.com")
+      end
     end
-  end
 
-  describe "GET organization_path" do
-    include_examples "redirects to the lowercase route" do
-      let(:path) { "/#{build(:organization).slug.upcase}" }
+    context "when host is a subdomain" do
+      it "removes session and remember_user_token cookies from the response" do
+        # Make sure you have an ApplicationConfig["SESSION_KEY"] defined
+        # in your test environment
+        # allow(ApplicationConfig).to receive(:[]).with("SESSION_KEY").and_return("_session_key")
+
+        get "/", headers: { "Host" => "sub.example.com" }
+
+        # "Set-Cookie" won't exist if the middleware has deleted it
+        # or you might see a blank or partial string. Let's just confirm it's not present:
+        expect(response.headers["Set-Cookie"].to_s).not_to include(ENV["SESSION_KEY"])
+        expect(response.headers["Set-Cookie"].to_s).not_to include("remember_user_token")
+      end
     end
   end
 end

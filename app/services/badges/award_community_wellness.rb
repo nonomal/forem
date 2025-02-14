@@ -1,6 +1,6 @@
 module Badges
   class AwardCommunityWellness
-    REWARD_STREAK_WEEKS = [1, 2, 4, 8, 16, 32].freeze
+    REWARD_STREAK_WEEKS = [1, 2, 4, 8, 16, 24, 32].freeze
 
     def self.call
       # These are the users 'eligible' to be awarded the badge
@@ -13,13 +13,16 @@ module Badges
 
         # `weeks_ago` can have values like the following:
         #    - [1,2,10,11,12]
-        #    - [5]
-        #    - [1,2,3,4,5,6,7,8]
+        #    - [0,5]
+        #    - [0,1,2,3,4,5,6,7,8]
         #    - [1,4,17]
         # We only care for active streak (starting at 1) so we need to filter
         # these to check how far back the (continuous) streak goes
         week_streak = 0
         weeks_ago.each_with_index do |week, index|
+          # Week 0 are comments that exist but aren't at least 1 week old yet
+          next if week.zero?
+
           # Must have 2 or more non-flagged comments posted on that week
           next unless comment_counts[index] > 1
 
@@ -34,20 +37,13 @@ module Badges
         next unless REWARD_STREAK_WEEKS.include?(week_streak)
         next unless (user = User.find_by(id: hash["user_id"]))
 
-        # TODO: Remove FeatureFlag when truly ready for production use
-        if FeatureFlag.enabled?(:community_wellness_badge)
-          badge_slug = "#{week_streak}-week-community-wellness-streak"
-          next unless (badge_id = Badge.id_for_slug(badge_slug))
+        badge_slug = "#{week_streak}-week-community-wellness-streak"
+        next unless (badge_id = Badge.id_for_slug(badge_slug))
 
-          user.badge_achievements.create(
-            badge_id: badge_id,
-            rewarding_context_message_markdown: generate_message(weeks: week_streak),
-          )
-        else
-          # If the FeatureFlag isn't enabled only track which users would get
-          # the badge to get an understanding of how the service will work
-          Ahoy.instance&.track("Community Wellness Badge Award", user_id: user.id, weeks: week_streak)
-        end
+        user.badge_achievements.create(
+          badge_id: badge_id,
+          rewarding_context_message_markdown: generate_message(weeks: week_streak),
+        )
       end
     end
 

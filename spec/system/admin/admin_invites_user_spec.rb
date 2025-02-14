@@ -1,6 +1,6 @@
 require "rails_helper"
 
-RSpec.describe "Admin invites user", type: :system do
+RSpec.describe "Admin invites user" do
   let(:admin) { create(:user, :super_admin) }
 
   before do
@@ -19,8 +19,8 @@ RSpec.describe "Admin invites user", type: :system do
     end
 
     it "shows a banner" do
-      message = "SMTP settings are required so that your Forem can send emails. If you wish to send invites, "\
-                "email digests and activity notifications you will need to specify which email host will relay those "\
+      message = "SMTP settings are required so that your Forem can send emails. If you wish to send invites, " \
+                "email digests and activity notifications you will need to specify which email host will relay those " \
                 "messages for you."
       expect(page).to have_content(message)
     end

@@ -1,11 +1,36 @@
 require "rails_helper"
 
-RSpec.describe "/admin", type: :request do
+RSpec.describe "/admin" do
   let(:super_admin) { create(:user, :super_admin) }
 
   before do
     sign_in super_admin
     allow(FeatureFlag).to receive(:enabled?).and_call_original
+  end
+
+  describe "Notices" do
+    it "does not show warning if deployed at is recent" do
+      allow(ForemInstance).to receive(:deployed_at).and_return(1.day.ago)
+      get admin_path
+
+      expect(response.body).not_to include("If you stay out of date for too long")
+    end
+
+    it "shows warning notice if deployed at is over two weeks ago" do
+      allow(ForemInstance).to receive(:deployed_at).and_return(3.weeks.ago)
+      get admin_path
+
+      expect(response.body).to include("If you stay out of date for too long")
+      expect(response.body).to include("crayons-notice--warning")
+    end
+
+    it "shows danger notice if deployed at is over four weeks ago" do
+      allow(ForemInstance).to receive(:deployed_at).and_return(5.weeks.ago)
+      get admin_path
+
+      expect(response.body).to include("If you stay out of date for too long")
+      expect(response.body).to include("crayons-notice--danger")
+    end
   end
 
   describe "Last deployed and Latest Commit ID card" do
@@ -22,7 +47,7 @@ RSpec.describe "/admin", type: :request do
 
       get admin_path
 
-      expect(response.body).to include(ENV["HEROKU_RELEASE_CREATED_AT"])
+      expect(response.body).to include(ENV.fetch("HEROKU_RELEASE_CREATED_AT", nil))
     end
   end
 
@@ -38,10 +63,13 @@ RSpec.describe "/admin", type: :request do
 
     it { is_expected.to include("Analytics and trends") }
     it { is_expected.to include("Yesterday") }
-    xit { is_expected.to include("Apr 23") }
 
-    xit "displays correct number of posts from past week" do
-      create(:article, published_at: Time.zone.today)
+    it "includes date", skip: "timezone-sensitive spec" do
+      expect(body).to include("Apr 23")
+    end
+
+    it "displays correct number of posts from past week", skip: "timezone-sensitive spec" do
+      create(:article, published_at: Time.current)
       create(:article, published_at: 1.day.ago)
       create(:article, published_at: 7.days.ago)
       create(:article, published_at: 8.days.ago)
@@ -51,7 +79,7 @@ RSpec.describe "/admin", type: :request do
     end
 
     it "displays correct number of comments from past week" do
-      create(:comment, created_at: Time.zone.today)
+      create(:comment, created_at: Time.current)
       create(:comment, created_at: 1.day.ago)
       create(:comment, created_at: 8.days.ago)
       get admin_path
@@ -60,7 +88,7 @@ RSpec.describe "/admin", type: :request do
     end
 
     it "displays correct number of reactions from past week" do
-      create(:reaction, created_at: Time.zone.today)
+      create(:reaction, created_at: Time.current)
       create(:reaction, created_at: 3.days.ago)
       create(:reaction, created_at: 2.weeks.ago)
       get admin_path
@@ -69,7 +97,7 @@ RSpec.describe "/admin", type: :request do
     end
 
     it "displays correct number of new members from past week" do
-      create(:user, registered_at: Time.zone.today)
+      create(:user, registered_at: Time.current)
       create(:user, registered_at: 2.days.ago)
       create(:user, registered_at: 10.days.ago)
       get admin_path
@@ -78,7 +106,7 @@ RSpec.describe "/admin", type: :request do
     end
 
     it "does not display data from previous weeks", :aggregate_failures do
-      create(:article, published_at: 8.days.ago)
+      create(:article, :past, past_published_at: 8.days.ago)
       create(:comment, created_at: 2.weeks.ago)
       create(:reaction, created_at: 1.month.ago)
       create(:user, registered_at: 10.days.ago)
@@ -91,10 +119,10 @@ RSpec.describe "/admin", type: :request do
     end
 
     it "does not display data from today", :aggregate_failures do
-      create(:article, published_at: Time.zone.today)
-      create(:comment, created_at: Time.zone.today)
-      create(:reaction, created_at: Time.zone.today)
-      create(:user, registered_at: Time.zone.today)
+      create(:article, published_at: Time.current)
+      create(:comment, created_at: Time.current)
+      create(:reaction, created_at: Time.current)
+      create(:user, registered_at: Time.current)
       get admin_path
 
       expect(body).to include "0</span> Posts"

@@ -17,7 +17,7 @@ class ArticlesController < ApplicationController
   #
   #              I still want to enable this, but first want to get things mostly conformant with
   #              existing expectations.  Note, in config/application.rb, we're rescuing the below
-  #              excpetion as though it was a Pundit::NotAuthorizedError.
+  #              exception as though it was a Pundit::NotAuthorizedError.
   #
   #              The difference being that rescue_from is an ALWAYS use case.  Whereas the
   #              config/application.rb uses the config.consider_all_requests_local to determine if
@@ -51,7 +51,7 @@ class ArticlesController < ApplicationController
 
     not_found unless @articles&.any?
 
-    set_surrogate_key_header "feed"
+    set_surrogate_key_header @user&.record_key, @articles.map(&:record_key)
     set_cache_control_headers(10.minutes.to_i, stale_while_revalidate: 30, stale_if_error: 1.day.to_i)
 
     render layout: false, content_type: "application/xml", locals: {
@@ -111,10 +111,10 @@ class ArticlesController < ApplicationController
     authorize Article
 
     begin
-      fixed_body_markdown = MarkdownProcessor::Fixer::FixForPreview.call(params[:article_body])
-      parsed = FrontMatterParser::Parser.new(:md).call(fixed_body_markdown)
-      parsed_markdown = MarkdownProcessor::Parser.new(parsed.content, source: Article.new, user: current_user)
-      processed_html = parsed_markdown.finalize
+      renderer = ContentRenderer.new(params[:article_body], source: Article.new, user: current_user)
+      result = renderer.process_article
+      processed_html = result.processed_html
+      front_matter = result.front_matter.to_h
     rescue StandardError => e
       @article = Article.new(body_markdown: params[:article_body])
       @article.errors.add(:base, ErrorMessages::Clean.call(e.message))
@@ -125,7 +125,6 @@ class ArticlesController < ApplicationController
         format.json { render json: @article.errors, status: :unprocessable_entity }
       else
         format.json do
-          front_matter = parsed.front_matter.to_h
           if front_matter["tags"]
             tags = Article.new.tag_list.add(front_matter["tags"], parser: ActsAsTaggableOn::TagParser)
           end
@@ -146,15 +145,19 @@ class ArticlesController < ApplicationController
 
   def create
     authorize Article
-
     @user = current_user
+    article_params_json[:subforem_id] ||= RequestStore.store[:subforem_id]
     article = Articles::Creator.call(@user, article_params_json)
 
-    render json: if article.persisted?
-                   { id: article.id, current_state_path: article.decorate.current_state_path }.to_json
-                 else
-                   article.errors.to_json
-                 end
+    if article.persisted?
+      if article.type_of == "status"
+        redirect_to article.path
+      else
+        render json: { id: article.id, current_state_path: article.decorate.current_state_path }, status: :ok
+      end
+    else
+      render json: article.errors.to_json, status: :unprocessable_entity
+    end
   end
 
   def update
@@ -182,11 +185,11 @@ class ArticlesController < ApplicationController
       end
 
       format.json do
-        render json: if updated.success
-                       @article.to_json(only: [:id], methods: [:current_state_path])
-                     else
-                       @article.errors.to_json
-                     end
+        if updated.success
+          render json: @article.to_json(only: [:id], methods: [:current_state_path]), status: :ok
+        else
+          render json: @article.errors.to_json, status: :unprocessable_entity
+        end
       end
     end
   end
@@ -209,17 +212,23 @@ class ArticlesController < ApplicationController
   def stats
     authorize @article
     @organization_id = @article.organization_id
+    @reactions = @article.reactions.public_category.order(created_at: :desc).limit(500).includes(:user)
   end
 
   def admin_unpublish
     authorize @article
-    if @article.has_frontmatter?
-      @article.body_markdown.sub!(/\npublished:\s*true\s*\n/, "\npublished: false\n")
-    else
-      @article.published = false
-    end
 
-    if @article.save
+    result = Articles::Unpublish.call(current_user, @article)
+
+    if result.success
+      Audit::Logger.log(:moderator, current_user, params.dup)
+      Note.create(
+        noteable: @article.user,
+        reason: "unpublish_article",
+        content: "#{current_user.username} unpublished post with ID #{@article.id}",
+        author: current_user,
+      )
+
       render json: { message: "success", path: @article.current_state_path }, status: :ok
     else
       render json: { message: @article.errors.full_messages }, status: :unprocessable_entity
@@ -269,10 +278,8 @@ class ArticlesController < ApplicationController
 
   def handle_user_or_organization_feed
     if (@user = User.find_by(username: params[:username]))
-      Honeycomb.add_field("articles_route", "user")
       @articles = @articles.where(user_id: @user.id)
     elsif (@user = Organization.find_by(slug: params[:username]))
-      Honeycomb.add_field("articles_route", "org")
       @articles = @articles.where(organization_id: @user.id).includes(:user)
     end
   end
@@ -293,12 +300,13 @@ class ArticlesController < ApplicationController
                       Article.includes(:user).find(params[:id])
                     end
     @article = found_article || not_found
-    Honeycomb.add_field("article_id", @article.id)
   end
 
   # TODO: refactor all of this update logic into the Articles::Updater possibly,
   # ideally there should only be one place to handle the update logic
   def article_params_json
+    return @article_params_json if @article_params_json
+
     params.require(:article) # to trigger the correct exception in case `:article` is missing
 
     params["article"].transform_keys!(&:underscore)
@@ -308,20 +316,39 @@ class ArticlesController < ApplicationController
                      else
                        %i[
                          title body_markdown main_image published description video_thumbnail_url
-                         tag_list canonical_url series collection_id archived
+                         tag_list canonical_url series collection_id archived published_at timezone
+                         published_at_date published_at_time type_of body_url subforem_id
                        ]
                      end
 
     # NOTE: the organization logic is still a little counter intuitive but this should
     # fix the bug <https://github.com/forem/forem/issues/2871>
-    if params["article"]["user_id"] && org_admin_user_change_privilege
+    if org_admin_user_change_privilege
       allowed_params << :user_id
+      allowed_params << :co_author_ids_list
     elsif params["article"]["organization_id"] && allowed_to_change_org_id?
       # change the organization of the article only if explicitly asked to do so
       allowed_params << :organization_id
     end
 
-    params.require(:article).permit(allowed_params)
+    manage_published_at_params
+
+    @article_params_json = params.require(:article).permit(allowed_params)
+  end
+
+  def manage_published_at_params
+    time_zone_str = params["article"].delete("timezone")
+
+    time = params["article"].delete("published_at_time")
+    date = params["article"].delete("published_at_date")
+
+    if date.present?
+      time_zone = Time.find_zone(time_zone_str)
+      time_zone ||= Time.find_zone("UTC")
+      params["article"]["published_at"] = time_zone.parse("#{date} #{time}")
+    elsif params["article"]["version"] != "v1" && !params["article"]["from_dashboard"]
+      params["article"]["published_at"] = nil
+    end
   end
 
   def allowed_to_change_org_id?
